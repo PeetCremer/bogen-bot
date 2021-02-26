@@ -1,2 +1,3 @@
-discord==1.6.0
+discord
 python-dotenv==0.15.0
+aiogoogle
