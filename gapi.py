@@ -65,4 +65,5 @@ if __name__ == "__main__":
       scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
     )
     ability_name = "unde"
-    asyncio.run(get_ability_value(CHARACTER_SHEET, 'Genna', creds, ability_name))
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(get_ability_value(CHARACTER_SHEET, 'Genna', creds, ability_name))
