@@ -2,21 +2,23 @@
 import os
 from numpy import random
 
+from aiogoogle import Aiogoogle
+from aiogoogle.models import HTTPError as AiogoogleHttpError
+from aiogoogle.auth.creds import ServiceAccountCreds
+
 import discord
 from discord.ext import commands
 
 from dotenv import load_dotenv
-
-from character_sheet import CharacterSheet
-
 import  io
 import csv
 
-
-
 bot = commands.Bot(command_prefix='!')
+CHARACTER_SHEET_HASH = None
 
-sheet = None
+class SheetNotFoundError(Exception):
+    def __init__(self, sheet_title):
+        super().__init__(f"Sheet with title '{sheet_title}' not found!")
 
 @bot.event
 async def on_ready():
@@ -36,98 +38,120 @@ async def hello(ctx):
     response = f"You said '{ctx.message.content}'"
     await ctx.send(response)
 
-@bot.command(name='update_sheet', help="Update the character sheet")
-async def update_sheet(ctx):
-    new_sheet = sheet.update_sheet()
-    response = "OK"
-    await ctx.send(response)
-
-@bot.command(name='print_sheet', help = "Print the currently loaded character sheet")
-async def print_sheet(ctx):
-    response = str(sheet.sheet)
-    await ctx.send(response)
-
+async def get_ability_by_name(aiog: Aiogoogle, sheets_service, doc_id, sheet_title, ability_name):
+    req = sheets_service.spreadsheets.values.get(spreadsheetId=doc_id, range=sheet_title)
+    req.url = f"https://docs.google.com/spreadsheets/d/{CHARACTER_SHEET_HASH}/gviz/tq?tq=select+A+,+F+where+lower(A)+contains+'{ability_name.lower()}'+limit+3&sheet={sheet_title}&tqx=out:csv"
+    try:
+        res_csv = await aiog.as_service_account(
+            req,
+        )
+        # extract all names and values from the csv response
+        name_value_pairs = []
+        for line in res_csv.split('\n'):
+            if len(line) == 0:
+                continue
+            name, value = line.replace('"','').split(',') # remove all "" and split at ,
+            value = int(value)
+            name_value_pairs.append((name,value))
+        return name_value_pairs
+    except AiogoogleHttpError as e:
+        if e.res.status_code == 400:
+            raise SheetNotFoundError(sheet_title)
+        else:
+            raise e
 
 @bot.command(name='check', help = "Roll a value on the character sheet")
 async def check(ctx, *args):
-    # validate args
-    expression = []
-    for idx, arg in enumerate(args):
-        if idx % 2 == 0:
-            # Try to extract value
-            val = sheet.sheet.get(arg, None)
-            if val is None:
-                response = "ERROR: Key {} not found in character sheet".format(arg)
-                return await ctx.send(response)
-            expression.append((arg, val))
-        else:
-            # Try to extract seperator
-            if arg ==  "+" or arg == "-":
-                expression.append(arg)
-            else:
-                response = "ERROR: {} is an invalid seperator. Valid seperators are '+' or '-'".format(arg)
-                return await ctx.send(response)
+    # Setup aiogoogle with sheets READ credentials
+    aiog = await setup_aiogoogle()
 
-            if idx == len(args)-1:
-                response = "ERROR: expression {} ends with a seperator!".format(ctx.message.content)
-                return await ctx.send(response)
+    expression = []
+    async with aiog:
+        sheets_service = await aiog.discover('sheets', 'v4')
+        for idx, arg in enumerate(args):
+            if idx % 2 == 0:
+                # Try to extract ability name and value
+                name = arg
+                name_value_pairs = await get_ability_by_name(aiog, sheets_service, CHARACTER_SHEET_HASH, 'Genna', name) # TODO more generic
+                if len(name_value_pairs) == 0:
+                    return await ctx.send(f"ERROR: No ability matches '{name}'")
+                if len(name_value_pairs) > 1:
+                    return await ctx.send(f"ERROR: Multiple abilities ({[it[0] for it in name_value_pairs]} ...) match '{name}'. Please be more specific!")
+                name, value = name_value_pairs[0]
+                value = int(value)
+                expression.append((name, value))
+            else:
+                # Try to extract seperator
+                sep = arg
+                if sep ==  "+" or sep == "-":
+                    expression.append(sep)
+                else:
+                    response = f"ERROR: {sep} is an invalid seperator. Valid seperators are '+' or '-'"
+                    return await ctx.send(response)
+
+                if idx == len(args)-1:
+                    response = "ERROR: expression {} ends with a seperator!".format(ctx.message.content)
+                    return await ctx.send(response)
 
     if len(expression) == 0:
-        response = "Nothing to roll!"
-        return await ctx.send(response)
+        return await ctx.send("Nothing to roll!")
 
     # Happy path
     plus = random.randint(1, 5)
     minus = random.randint(1, 5)
-    response = "2 x {} + d4 - d4 = {} + {} - {} = {} ".format(arg, 2*val, plus, minus, 2*val + plus - minus)
 
     if len(expression) == 1:
-        arg, val = expression[0]
-        response = "Rolling 2 x {} + d4 - d4 = {} + {} - {} = **{}**".format(arg, 2*val, plus, minus, 2*val + plus - minus)
+        name, value = expression[0]
+        response = "Rolling 2 x {} + d4 - d4 = {} + {} - {} = **{}**".format(name, 2*value, plus, minus, 2*value + plus - minus)
     else:
         response_first = ""
         response_second = ""
         result = plus - minus
-        prev_seperator = "+"
-        for idx, arg_val_or_seperator in enumerate(expression):
+        prev_sep = "+"
+        for idx, name_value_or_sep in enumerate(expression):
             if idx % 2 == 0:
-                #arg_val
-                (arg, val) = arg_val_or_seperator
-                response_first += arg
-                response_second += "{}".format(val)
-                if prev_seperator == "+":
-                    result += val
+                # name, value pair
+                (name, value) = name_value_or_sep
+                response_first += name
+                response_second += "{}".format(value)
+                if prev_sep == "+":
+                    result += value
                 else:
-                    result -= val
+                    result -= value
             else:
                 # seperator
-                seperator = arg_val_or_seperator
-                response_first += " {} ".format(seperator)
-                response_second += " {} ".format(seperator)
-                prev_seperator = seperator
+                sep = name_value_or_sep
+                response_first += " {} ".format(sep)
+                response_second += " {} ".format(sep)
+                prev_sep = sep
 
         response = "Rolling {} + d4 - d4 = {} + {} - {} = **{}**".format(response_first, response_second, plus, minus, result)
-
-                
     await ctx.send(response)
 
-            
+
+def getenv_required(env):
+    if env in os.environ:
+        return os.environ[env]
+    raise ValueError(f"Environment variable '{env}' needs to be set!")
+
+async def setup_aiogoogle():
+    creds = ServiceAccountCreds(
+      scopes=['https://www.googleapis.com/auth/spreadsheets.readonly']
+    )
+    aiog = Aiogoogle(service_account_creds=creds)
+    # Notice this line. Here, Aiogoogle loads the service account key.
+    await aiog.service_account_manager.detect_default_creds_source()
+    return aiog
 
 
 
 if __name__ == "__main__":
   # Load env parameters
   load_dotenv()
-  DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN', None)
-  if DISCORD_BOT_TOKEN is None:
-    raise ValueError("Environnment variable 'DISCORD_BOT_TOKEN' has to be set!")
-  CHARACTER_SHEET_URL = os.getenv('CHARACTER_SHEET_URL', None)
-  if CHARACTER_SHEET_URL is None:
-    raise ValueError("Environnment variable 'CHARACTER_SHEET_URL' has to be set!")
-  
-  # Initialize sheet
-  sheet = CharacterSheet(CHARACTER_SHEET_URL)
-  sheet.update_sheet()
+
+  DISCORD_BOT_TOKEN = getenv_required('DISCORD_BOT_TOKEN')
+  CHARACTER_SHEET_HASH = getenv_required('CHARACTER_SHEET_HASH')
+  _ = getenv_required('GOOGLE_APPLICATION_CREDENTIALS') # just make sure it is set
 
   bot.run(DISCORD_BOT_TOKEN)
 
