@@ -65,6 +65,10 @@ async def check(ctx, *args):
     # Setup aiogoogle with sheets READ credentials
     aiog = await setup_aiogoogle()
 
+    # Quick hack to make rolling for everyone work
+    character_name = args[0]
+    args = args[1:]
+
     expression = []
     async with aiog:
         sheets_service = await aiog.discover('sheets', 'v4')
@@ -72,7 +76,7 @@ async def check(ctx, *args):
             if idx % 2 == 0:
                 # Try to extract ability name and value
                 name = arg
-                name_value_pairs = await get_ability_by_name(aiog, sheets_service, CHARACTER_SHEET_HASH, 'Genna', name) # TODO more generic
+                name_value_pairs = await get_ability_by_name(aiog, sheets_service, CHARACTER_SHEET_HASH, character_name, name) # TODO more generic
                 if len(name_value_pairs) == 0:
                     return await ctx.send(f"ERROR: No ability matches '{name}'")
                 if len(name_value_pairs) > 1:
