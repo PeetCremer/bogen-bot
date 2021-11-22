@@ -5,12 +5,37 @@ description = ""
 authors = ["Jaezred <dark-ninja@web.de>"]
 
 [tool.poetry.dependencies]
-python = "^3.9"
+python = ">=3.9,<3.11"
 python-dotenv = "^0.19.2"
 discord = "^1.7.3"
+numpy = "^1.21.4"
 
 [tool.poetry.dev-dependencies]
 pytest = "^5.2"
+black = "^21.11b1"
+pre-commit = "^2.15.0"
+mypy = "^0.910"
+flake8 = "^4.0.1"
+pylint = "^2.11.1"
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = false
+warn_unused_configs = true
+plugins = "numpy.typing.mypy_plugin"
+
+[[tool.mypy.overrides]]
+module = [
+  "aiogoogle.*",
+  "discord.*",
+  "dotenv"
+]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = "bot.*"
+disallow_untyped_decorators = false
+
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
