@@ -16,6 +16,8 @@ def getenv_required(env: str) -> str:
     raise ValueError(f"Environment variable '{env}' needs to be set!")
 
 
+DOTENV_PATH = os.path.join(os.path.dirname(__file__), os.pardir, ".env")
+load_dotenv(DOTENV_PATH)
 DISCORD_BOT_TOKEN = getenv_required("DISCORD_BOT_TOKEN")
 CHARACTER_SHEET_HASH = getenv_required("CHARACTER_SHEET_HASH")
 GOOGLE_APPLICATION_CREDENTIALS = getenv_required("GOOGLE_APPLICATION_CREDENTIALS")
@@ -30,7 +32,7 @@ class SheetNotFoundError(Exception):
 
 @bot.event
 async def on_ready() -> None:
-    print("Bot h    as connected to Discord!")
+    print("Bot has connected to Discord!")
 
 
 @bot.event
@@ -179,7 +181,4 @@ async def setup_aiogoogle() -> Aiogoogle:
 
 
 if __name__ == "__main__":
-    # Load env parameters
-    load_dotenv()
-
     bot.run(DISCORD_BOT_TOKEN)
