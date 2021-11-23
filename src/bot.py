@@ -50,15 +50,23 @@ async def get_ability_by_name(
     doc_id: str,
     sheet_title: str,
     ability_name: str,
+    lowercast: bool = True,
 ) -> List[Tuple[str, int]]:
     req = sheets_service.spreadsheets.values.get(
         spreadsheetId=doc_id, range=sheet_title
     )
-    req.url = (
-        f"https://docs.google.com/spreadsheets/d/{CHARACTER_SHEET_HASH}/gviz/tq"
-        f"?tq=select+A+,+F+where+lower(A)+contains+'{ability_name.lower()}'"
-        f"+limit+3&sheet={sheet_title}&tqx=out:csv"
-    )
+    if lowercast:
+        req.url = (
+            f"https://docs.google.com/spreadsheets/d/{CHARACTER_SHEET_HASH}/gviz/tq"
+            f"?tq=select+A+,+F+where+lower(A)+contains+'{ability_name.lower()}'"
+            f"+limit+3&sheet={sheet_title}&tqx=out:csv"
+        )
+    else:
+        req.url = (
+            f"https://docs.google.com/spreadsheets/d/{CHARACTER_SHEET_HASH}/gviz/tq"
+            f"?tq=select+A+,+F+where+A+contains+'{ability_name}'"
+            f"+limit+3&sheet={sheet_title}&tqx=out:csv"
+        )
     try:
         res_csv = await aiog.as_service_account(
             req,
@@ -96,15 +104,33 @@ async def check(ctx: commands.Context, *args: str) -> Any:
             if idx % 2 == 0:
                 # Try to extract ability name and value
                 name = arg
+                # First try to find results with lowercasting the name
                 name_value_pairs = await get_ability_by_name(
-                    aiog, sheets_service, CHARACTER_SHEET_HASH, character_name, name
-                )  # TODO more generic
+                    aiog,
+                    sheets_service,
+                    CHARACTER_SHEET_HASH,
+                    character_name,
+                    name,
+                    lowercast=False,
+                )
                 if len(name_value_pairs) == 0:
-                    return await ctx.send(f"ERROR: No ability matches '{name}'")
+                    # No results found, try again with lowercasting
+                    name_value_pairs = await get_ability_by_name(
+                        aiog,
+                        sheets_service,
+                        CHARACTER_SHEET_HASH,
+                        character_name,
+                        name,
+                        lowercast=True,
+                    )
+                    if len(name_value_pairs) == 0:
+                        # Still no result, now it is a hard error
+                        return await ctx.send(f"ERROR: No ability matches '{name}'")
                 if len(name_value_pairs) > 1:
                     return await ctx.send(
                         f"ERROR: Multiple abilities ({[it[0] for it in name_value_pairs]} ...)"
-                        f" match '{name}'. Please be more specific!"
+                        f" match '{name}'. Please be more specific,"
+                        " e.g. by typing more out or using correct uppercase."
                     )
                 name, value = name_value_pairs[0]
                 value = int(value)
