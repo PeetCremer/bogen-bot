@@ -3,3 +3,4 @@ __pycache__
 *.log
 .venv
 .vscode
+google_application_credentials.json
