@@ -1,7 +1,8 @@
 # bot.py
 import os
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
+import aiofiles
 from aiogoogle import Aiogoogle
 from aiogoogle.auth.creds import ServiceAccountCreds
 from aiogoogle.models import HTTPError as AiogoogleHttpError
@@ -21,6 +22,7 @@ load_dotenv(DOTENV_PATH)
 DISCORD_BOT_TOKEN = getenv_required("DISCORD_BOT_TOKEN")
 CHARACTER_SHEET_HASH = getenv_required("CHARACTER_SHEET_HASH")
 GOOGLE_APPLICATION_CREDENTIALS = getenv_required("GOOGLE_APPLICATION_CREDENTIALS")
+CLAIMS_DIR = getenv_required("CLAIMS_DIR")
 
 bot = commands.Bot(command_prefix="!")
 
@@ -30,18 +32,14 @@ class SheetNotFoundError(Exception):
         super().__init__(f"Sheet with title '{sheet_title}' not found!")
 
 
-@bot.event
-async def on_ready() -> None:
-    print("Bot has connected to Discord!")
-
-
-@bot.event
-async def on_error(event: str, *args: str, **kwargs: Any) -> None:
-    with open("err.log", "a") as f:
-        if event == "on_message":
-            f.write(f"Unhandled message: {args[0]}\n")
-        else:
-            raise
+async def setup_aiogoogle() -> Aiogoogle:
+    creds = ServiceAccountCreds(
+        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    )
+    aiog = Aiogoogle(service_account_creds=creds)
+    # Notice this line. Here, Aiogoogle loads the service account key.
+    await aiog.service_account_manager.detect_default_creds_source()
+    return aiog
 
 
 async def get_ability_by_name(
@@ -53,17 +51,17 @@ async def get_ability_by_name(
     lowercast: bool = True,
 ) -> List[Tuple[str, int]]:
     req = sheets_service.spreadsheets.values.get(
-        spreadsheetId=doc_id, range=sheet_title
+        spreadsheetId=doc_id, range=sheet_title  # is doc_id required here?
     )
     if lowercast:
         req.url = (
-            f"https://docs.google.com/spreadsheets/d/{CHARACTER_SHEET_HASH}/gviz/tq"
+            f"https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq"
             f"?tq=select+A+,+F+where+lower(A)+contains+'{ability_name.lower()}'"
             f"+limit+3&sheet={sheet_title}&tqx=out:csv"
         )
     else:
         req.url = (
-            f"https://docs.google.com/spreadsheets/d/{CHARACTER_SHEET_HASH}/gviz/tq"
+            f"https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq"
             f"?tq=select+A+,+F+where+A+contains+'{ability_name}'"
             f"+limit+3&sheet={sheet_title}&tqx=out:csv"
         )
@@ -88,18 +86,110 @@ async def get_ability_by_name(
     return name_value_pairs
 
 
-@bot.command(name="check", help="Roll a value on the character sheet")
-async def check(ctx: commands.Context, *args: str) -> Any:
+async def write_claim(guild_id: int, author_id: int, sheet_title: str) -> None:
+    guild_dir_path = os.path.join(CLAIMS_DIR, str(guild_id))
+    # TODO use the below as soon as aiofiles v0.8.0 gets released
+    # await aiofiles.os.makedirs(guild_dir_path, exist_ok=True)
+    # For now use the following workaround to create the dirs
+    try:
+        await aiofiles.os.mkdir(CLAIMS_DIR)  # type: ignore[attr-defined]
+    except FileExistsError:
+        pass
+    try:
+        await aiofiles.os.mkdir(guild_dir_path)  # type: ignore[attr-defined]
+    except FileExistsError:
+        pass
+    # Create the claim file
+    author_file_path = os.path.join(guild_dir_path, str(author_id))
+    async with aiofiles.open(author_file_path, "w") as f:
+        await f.write(sheet_title)
+
+
+async def read_claim(guild_id: int, author_id: int) -> Optional[str]:
+    author_file_path = os.path.join(CLAIMS_DIR, str(guild_id), str(author_id))
+    try:
+        async with aiofiles.open(author_file_path, "r") as f:
+            sheet_title = await f.read()
+        return sheet_title
+    except FileNotFoundError:
+        return None
+
+
+async def get_sheet_titles(
+    aiog: Aiogoogle, sheets_service: Any, doc_id: str
+) -> List[str]:
+    req = sheets_service.spreadsheets.get(
+        spreadsheetId=doc_id, fields=["sheets.properties.title"]
+    )
+    res = await aiog.as_service_account(
+        req,
+    )
+    sheet_titles = [sheet["properties"]["title"] for sheet in res["sheets"]]
+    return sheet_titles
+
+
+@bot.event
+async def on_ready() -> None:
+    print("Bot has connected to Discord!")
+
+
+@bot.event
+async def on_error(event: str, *args: str, **kwargs: Any) -> None:
+    with open("err.log", "a") as f:
+        if event == "on_message":
+            f.write(f"Unhandled message: {args[0]}\n")
+        else:
+            raise
+
+
+@bot.command(name="claim", help="Bind a character sheet to your user")
+async def claim(ctx: commands.Context, *args: str) -> Any:
+    if len(args) != 1:
+        return await ctx.send(
+            "ERROR: Invalid number of arguments."
+            " Please provide exactly one character sheet name!"
+        )
+    sheet_title = args[0]
+
+    aiog = await setup_aiogoogle()
+    async with aiog:
+        sheets_service = await aiog.discover("sheets", "v4")
+        sheet_titles = await get_sheet_titles(
+            aiog, sheets_service, CHARACTER_SHEET_HASH
+        )
+
+    if sheet_title not in sheet_titles:
+        return await ctx.send(
+            f"ERROR: {sheet_title} is not a sheet in the"
+            " configured character sheet document!"
+        )
+    # write the claim
+    guild_id = ctx.message.guild.id
+    author_id = ctx.message.author.id
+    await write_claim(guild_id, author_id, sheet_title)
+    return await ctx.send(
+        f"{ctx.message.author} claimed the sheet with title {sheet_title}"
+    )
+
+
+async def check_impl(ctx: commands.Context, character_name: str, *args: str) -> Any:
+
     # Setup aiogoogle with sheets READ credentials
     aiog = await setup_aiogoogle()
-
-    # Quick hack to make rolling for everyone work
-    character_name = args[0]
-    args = args[1:]
 
     expression: List[Union[Tuple[str, int], str]] = []
     async with aiog:
         sheets_service = await aiog.discover("sheets", "v4")
+        # First make sure that the character_name belongs to a valid sheet
+        sheet_titles = await get_sheet_titles(
+            aiog, sheets_service, CHARACTER_SHEET_HASH
+        )
+        if character_name not in sheet_titles:
+            return await ctx.send(
+                f"ERROR: character name '{character_name}' does not correspond to a valid"
+                " sheet in the configured character document!"
+            )
+
         for idx, arg in enumerate(args):
             if idx % 2 == 0:
                 # Try to extract ability name and value
@@ -163,8 +253,9 @@ async def check(ctx: commands.Context, *args: str) -> Any:
     if len(expression) == 1:
         assert isinstance(expression[0], tuple)
         name, value = expression[0]
-        response = "Rolling 2 x {} + d4 - d4 = {} + {} - {} = **{}**".format(
-            name, 2 * value, plus, minus, 2 * value + plus - minus
+        response = (
+            f"**{character_name}** rolls 2 x {name} + d4 - d4 = "
+            f"{2*value} + {plus} - {minus} = **{2*value + plus - minus}**"
         )
     else:
         response_first = ""
@@ -190,20 +281,37 @@ async def check(ctx: commands.Context, *args: str) -> Any:
                 response_first += " {} ".format(sep)
                 response_second += " {} ".format(sep)
 
-        response = "Rolling {} + d4 - d4 = {} + {} - {} = **{}**".format(
-            response_first, response_second, plus, minus, result
+        response = (
+            f"**{character_name}** rolls {response_first} + d4 - d4 = "
+            f"{response_second} + {plus} - {minus} = **{result}**"
         )
     await ctx.send(response)
 
 
-async def setup_aiogoogle() -> Aiogoogle:
-    creds = ServiceAccountCreds(
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    )
-    aiog = Aiogoogle(service_account_creds=creds)
-    # Notice this line. Here, Aiogoogle loads the service account key.
-    await aiog.service_account_manager.detect_default_creds_source()
-    return aiog
+@bot.command(name="check", help="Roll a value on your character sheet")
+async def check(ctx: commands.Context, *args: str) -> Any:
+    # Find out which character the author has claimed
+    guild_id = ctx.message.guild.id
+    author_id = ctx.message.author.id
+    character_name = await read_claim(guild_id, author_id)
+    if character_name is None:
+        return await ctx.send(
+            f"@{ctx.message.author} you have not claimed a character yet."
+            " Please do so by using the '!claim (character name)' command"
+        )
+    return await check_impl(ctx, character_name, *args)
+
+
+@bot.command(
+    name="check_character",
+    help="Roll a value on the character sheet of a given character",
+)
+async def check_character(ctx: commands.Context, *args: str) -> Any:
+    if len(args) < 1:
+        return await ctx.send("ERROR: too few arguments")
+    character_name = args[0]
+    args = args[1:]
+    return await check_impl(ctx, character_name, *args)
 
 
 if __name__ == "__main__":
