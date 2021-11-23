@@ -148,6 +148,8 @@ async def claim(ctx: commands.Context, *args: str) -> Any:
         return await ctx.send(
             "ERROR: Invalid number of arguments."
             " Please provide exactly one character sheet name!"
+            ' If the name contains whitespaces, surround it with "",'
+            ' i.e. "(sheet name with whitespaces)"'
         )
     sheet_title = args[0]
 
