@@ -1,16 +1,13 @@
 # bot.py
 import os
-from numpy import random
-
-from typing import List, Tuple, Any, Union
+from typing import Any, List, Tuple, Union
 
 from aiogoogle import Aiogoogle
-from aiogoogle.models import HTTPError as AiogoogleHttpError
 from aiogoogle.auth.creds import ServiceAccountCreds
-
+from aiogoogle.models import HTTPError as AiogoogleHttpError
 from discord.ext import commands
-
 from dotenv import load_dotenv
+from numpy import random
 
 
 def getenv_required(env: str) -> str:

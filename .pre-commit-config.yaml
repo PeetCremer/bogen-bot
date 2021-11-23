@@ -6,15 +6,15 @@ repos:
   hooks:
   - id: black
     language_version: python3.9
+- repo: https://github.com/timothycrosley/isort
+  rev: 5.6.4
+  hooks: 
+    - id: isort
+      name: isort (python)
 - repo: https://github.com/pycqa/flake8
-  rev: ''  # pick a git hash / tag to point to
+  rev: 3.9.2  # pick a git hash / tag to point to
   hooks:
   - id: flake8
-- repo: https://github.com/pre-commit/mirrors-pylint
-  rev: v3.0.0a3
-  hooks:
-  - id: pylint
-    args: [--disable=all, --enable=unused-import]
 - repo: local
   # We do not use pre-commit/mirrors-mypy, 
   # as it comes with opinionated defaults 
