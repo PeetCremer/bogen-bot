@@ -1,4 +1,7 @@
+from typing import Any, Dict
+
 from dependency_injector import containers, providers
+from dependency_injector.wiring import Provide, inject
 from dotenv import find_dotenv
 from pydantic import BaseSettings, Field
 
@@ -28,14 +31,31 @@ class Settings(BaseSettingsWithConfig):
     db: DatabaseSettings = DatabaseSettings()
 
 
-class Container(containers.DeclarativeContainer):
-    config = providers.Configuration(pydantic_settings=[Settings()])
+class SomeContainer(containers.DeclarativeContainer):
+    config = providers.Configuration()
+
+
+class Application(containers.DeclarativeContainer):
+    config = providers.Configuration(pydantic_settings=[Settings()], strict=True)
+    some = providers.Container(SomeContainer, config=config.discord)
+
+
+@inject
+def main(
+    discord_bot_token: str = Provide[Application.config.discord.discord_bot_token],
+    some_config: Dict[str, Any] = Provide[Application.some.config],
+) -> None:
+    print(type(discord_bot_token))
+    print(discord_bot_token)
+
+    print(type(some_config))
+    print(some_config)
 
 
 if __name__ == "__main__":
-    container = Container()
+    application = Application()
+    application.wire(modules=[__name__])
 
-    print(container.config.discord.discord_bot_token())
-    print(container.config.gapi.google_application_credentials())
-    print(container.config.gapi.character_sheet_hash())
-    print(container.config.db.claims_dir())
+    print(type(application.config.discord))
+
+    main()
