@@ -4,3 +4,6 @@ __pycache__
 .venv
 .vscode
 google_application_credentials.json
+
+# TODO remove when db changes are merged
+claims/
