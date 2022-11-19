@@ -4,11 +4,11 @@ import os
 from typing import Any, Awaitable, List, Optional, Tuple, Union
 
 import aiofiles
+import numpy as np
 from aiogoogle import Aiogoogle
 from aiogoogle.models import HTTPError as AiogoogleHttpError
 from dependency_injector.wiring import Provide, inject
 from discord.ext import commands
-from numpy import random
 
 from app_config import AppConfigContainer
 
@@ -170,6 +170,78 @@ async def claim(
     )
 
 
+def parse_int(string: str) -> Optional[int]:
+    try:
+        res = int(string)
+        return res
+    except ValueError:
+        return None
+
+
+@bot.command(name="roll", help="Roll any dice expression")
+async def roll(ctx: commands.Context, *args: str) -> Any:
+    guild_id = ctx.message.guild.id
+    author_id = ctx.message.author.id
+    character_name = await read_claim(guild_id, author_id)
+    roller_name = ctx.message.author if character_name is None else character_name
+
+    expression: str = ""
+    result: int = 0
+    sign: int = 1
+    for idx, arg in enumerate(args):
+        if idx % 2 == 0:
+            # Try to extract dice or constant
+            expr = arg.split("d")
+            valid = True
+            if len(expr) == 2:
+                num_expr: str = expr[0]
+                num: Optional[int] = parse_int(num_expr) if len(num_expr) else 1
+
+                sides_expr: str = expr[1]
+                sides: Optional[int] = parse_int(sides_expr)
+                if num is None or num < 0 or sides is None or sides < 0:
+                    valid = False
+                else:
+                    rolls = np.random.randint(1, sides, size=num)
+                    result += sign * np.sum(rolls)
+                    rolls_expr = ",".join(str(r) for r in rolls)
+                    expression += f"{num}d{sides}({rolls_expr})"
+
+            elif len(expr) == 1:
+                constant: Optional[int] = parse_int(expr[0])
+                if constant is None or constant < 0:
+                    valid = False
+                else:
+                    result += sign * constant
+                    expression += f"{constant}"
+            else:
+                valid = False
+            if not valid:
+                return await ctx.send(
+                    f"@{ctx.message.author}: {arg} is not a valid dice roll expression"
+                )
+        else:
+            if arg == "+":
+                sign = 1
+                expression += " + "
+            elif arg == "-":
+                sign = -1
+                expression += " - "
+            else:
+                return await ctx.send(
+                    f"@{ctx.message.author}: {arg} is not a valid seperator in dice roll expression"
+                )
+            if idx == len(args) - 1:
+                return await ctx.send(
+                    f"@{ctx.message.author}: dice roll expression cannot end with seperator {arg}"
+                )
+    if len(expression) == 0:
+        return await ctx.send(
+            f"@{ctx.message.author} nothing to roll in dice roll expression!"
+        )
+    return await ctx.send(f"{roller_name} rolls {expression}: **{result}**")
+
+
 @inject
 async def check_impl(
     ctx: commands.Context,
@@ -250,8 +322,8 @@ async def check_impl(
         return await ctx.send("Nothing to roll!")
 
     # Happy path
-    plus = random.randint(1, 5)
-    minus = random.randint(1, 5)
+    plus = np.random.randint(1, 5)
+    minus = np.random.randint(1, 5)
 
     if len(expression) == 1:
         assert isinstance(expression[0], tuple)
