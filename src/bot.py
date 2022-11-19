@@ -1,28 +1,16 @@
 # bot.py
+import asyncio
 import os
-from typing import Any, List, Optional, Tuple, Union
+from typing import Any, Awaitable, List, Optional, Tuple, Union
 
 import aiofiles
 from aiogoogle import Aiogoogle
-from aiogoogle.auth.creds import ServiceAccountCreds
 from aiogoogle.models import HTTPError as AiogoogleHttpError
+from dependency_injector.wiring import Provide, inject
 from discord.ext import commands
-from dotenv import load_dotenv
 from numpy import random
 
-
-def getenv_required(env: str) -> str:
-    if env in os.environ:
-        return os.environ[env]
-    raise ValueError(f"Environment variable '{env}' needs to be set!")
-
-
-DOTENV_PATH = os.path.join(os.path.dirname(__file__), os.pardir, ".env")
-load_dotenv(DOTENV_PATH)
-DISCORD_BOT_TOKEN = getenv_required("DISCORD_BOT_TOKEN")
-CHARACTER_SHEET_HASH = getenv_required("CHARACTER_SHEET_HASH")
-GOOGLE_APPLICATION_CREDENTIALS = getenv_required("GOOGLE_APPLICATION_CREDENTIALS")
-CLAIMS_DIR = getenv_required("CLAIMS_DIR")
+from app_config import AppConfigContainer
 
 bot = commands.Bot(command_prefix="!")
 
@@ -30,16 +18,6 @@ bot = commands.Bot(command_prefix="!")
 class SheetNotFoundError(Exception):
     def __init__(self, sheet_title: str) -> None:
         super().__init__(f"Sheet with title '{sheet_title}' not found!")
-
-
-async def setup_aiogoogle() -> Aiogoogle:
-    creds = ServiceAccountCreds(
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
-    )
-    aiog = Aiogoogle(service_account_creds=creds)
-    # Notice this line. Here, Aiogoogle loads the service account key.
-    await aiog.service_account_manager.detect_default_creds_source()
-    return aiog
 
 
 async def get_ability_by_name(
@@ -86,13 +64,19 @@ async def get_ability_by_name(
     return name_value_pairs
 
 
-async def write_claim(guild_id: int, author_id: int, sheet_title: str) -> None:
-    guild_dir_path = os.path.join(CLAIMS_DIR, str(guild_id))
+@inject
+async def write_claim(
+    guild_id: int,
+    author_id: int,
+    sheet_title: str,
+    claims_dir: str = Provide[AppConfigContainer.config.db.claims_dir],
+) -> None:
+    guild_dir_path = os.path.join(claims_dir, str(guild_id))
     # TODO use the below as soon as aiofiles v0.8.0 gets released
     # await aiofiles.os.makedirs(guild_dir_path, exist_ok=True)
     # For now use the following workaround to create the dirs
     try:
-        await aiofiles.os.mkdir(CLAIMS_DIR)  # type: ignore[attr-defined]
+        await aiofiles.os.mkdir(claims_dir)  # type: ignore[attr-defined]
     except FileExistsError:
         pass
     try:
@@ -105,8 +89,13 @@ async def write_claim(guild_id: int, author_id: int, sheet_title: str) -> None:
         await f.write(sheet_title)
 
 
-async def read_claim(guild_id: int, author_id: int) -> Optional[str]:
-    author_file_path = os.path.join(CLAIMS_DIR, str(guild_id), str(author_id))
+@inject
+async def read_claim(
+    guild_id: int,
+    author_id: int,
+    claims_dir: str = Provide[AppConfigContainer.config.db.claims_dir],
+) -> Optional[str]:
+    author_file_path = os.path.join(claims_dir, str(guild_id), str(author_id))
     try:
         async with aiofiles.open(author_file_path, "r") as f:
             sheet_title = await f.read()
@@ -143,7 +132,15 @@ async def on_error(event: str, *args: str, **kwargs: Any) -> None:
 
 
 @bot.command(name="claim", help="Bind a character sheet to your user")
-async def claim(ctx: commands.Context, *args: str) -> Any:
+@inject
+async def claim(
+    ctx: commands.Context,
+    *args: str,
+    character_sheet_hash: str = Provide[
+        AppConfigContainer.config.gapi.character_sheet_hash
+    ],
+    aiog: Aiogoogle = Provide[AppConfigContainer.aiog],
+) -> Any:
     if len(args) != 1:
         return await ctx.send(
             "ERROR: Invalid number of arguments."
@@ -153,11 +150,10 @@ async def claim(ctx: commands.Context, *args: str) -> Any:
         )
     sheet_title = args[0]
 
-    aiog = await setup_aiogoogle()
     async with aiog:
         sheets_service = await aiog.discover("sheets", "v4")
         sheet_titles = await get_sheet_titles(
-            aiog, sheets_service, CHARACTER_SHEET_HASH
+            aiog, sheets_service, character_sheet_hash
         )
 
     if sheet_title not in sheet_titles:
@@ -174,17 +170,22 @@ async def claim(ctx: commands.Context, *args: str) -> Any:
     )
 
 
-async def check_impl(ctx: commands.Context, character_name: str, *args: str) -> Any:
-
-    # Setup aiogoogle with sheets READ credentials
-    aiog = await setup_aiogoogle()
-
+@inject
+async def check_impl(
+    ctx: commands.Context,
+    character_name: str,
+    *args: str,
+    character_sheet_hash: str = Provide[
+        AppConfigContainer.config.gapi.character_sheet_hash
+    ],
+    aiog: Aiogoogle = Provide[AppConfigContainer.aiog],
+) -> Any:
     expression: List[Union[Tuple[str, int], str]] = []
     async with aiog:
         sheets_service = await aiog.discover("sheets", "v4")
         # First make sure that the character_name belongs to a valid sheet
         sheet_titles = await get_sheet_titles(
-            aiog, sheets_service, CHARACTER_SHEET_HASH
+            aiog, sheets_service, character_sheet_hash
         )
         if character_name not in sheet_titles:
             return await ctx.send(
@@ -200,7 +201,7 @@ async def check_impl(ctx: commands.Context, character_name: str, *args: str) -> 
                 name_value_pairs = await get_ability_by_name(
                     aiog,
                     sheets_service,
-                    CHARACTER_SHEET_HASH,
+                    character_sheet_hash,
                     character_name,
                     name,
                     lowercast=False,
@@ -210,7 +211,7 @@ async def check_impl(ctx: commands.Context, character_name: str, *args: str) -> 
                     name_value_pairs = await get_ability_by_name(
                         aiog,
                         sheets_service,
-                        CHARACTER_SHEET_HASH,
+                        character_sheet_hash,
                         character_name,
                         name,
                         lowercast=True,
@@ -316,5 +317,23 @@ async def check_character(ctx: commands.Context, *args: str) -> Any:
     return await check_impl(ctx, character_name, *args)
 
 
+@inject
+def main(
+    discord_bot_token: str = Provide[
+        AppConfigContainer.config.discord.discord_bot_token
+    ],
+) -> None:
+    bot.run(discord_bot_token)
+
+
+async def init_resources(container: AppConfigContainer) -> Awaitable[None]:
+    awaitable = container.init_resources()
+    assert awaitable is not None
+    return awaitable
+
+
 if __name__ == "__main__":
-    bot.run(DISCORD_BOT_TOKEN)
+    config_container = AppConfigContainer()
+    config_container.wire(modules=[__name__])
+    asyncio.run(init_resources(config_container))
+    main()
