@@ -1,7 +1,8 @@
 # bot.py
 import asyncio
+import json
 import os
-from typing import Any, Awaitable, List, Optional, Tuple, Union
+from typing import Any, Awaitable, Dict, List, Optional, Tuple, Union
 
 import aiofiles
 import numpy as np
@@ -34,13 +35,13 @@ async def get_ability_by_name(
     if lowercast:
         req.url = (
             f"https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq"
-            f"?tq=select+A+,+F+where+lower(A)+contains+'{ability_name.lower()}'"
+            f"?tq=select+A+,+G+where+lower(A)+contains+'{ability_name.lower()}'"
             f"+limit+3&sheet={sheet_title}&tqx=out:csv"
         )
     else:
         req.url = (
             f"https://docs.google.com/spreadsheets/d/{doc_id}/gviz/tq"
-            f"?tq=select+A+,+F+where+A+contains+'{ability_name}'"
+            f"?tq=select+A+,+G+where+A+contains+'{ability_name}'"
             f"+limit+3&sheet={sheet_title}&tqx=out:csv"
         )
     try:
@@ -104,17 +105,16 @@ async def read_claim(
         return None
 
 
-async def get_sheet_titles(
+async def get_sheets_properties(
     aiog: Aiogoogle, sheets_service: Any, doc_id: str
-) -> List[str]:
+) -> List[Dict[str, Any]]:
     req = sheets_service.spreadsheets.get(
-        spreadsheetId=doc_id, fields=["sheets.properties.title"]
+        spreadsheetId=doc_id, fields=["sheets.properties"]
     )
     res = await aiog.as_service_account(
         req,
     )
-    sheet_titles = [sheet["properties"]["title"] for sheet in res["sheets"]]
-    return sheet_titles
+    return [sheet["properties"] for sheet in res["sheets"]]
 
 
 @bot.event
@@ -129,6 +129,197 @@ async def on_error(event: str, *args: str, **kwargs: Any) -> None:
             f.write(f"Unhandled message: {args[0]}\n")
         else:
             raise
+
+
+@bot.command(name="migrate", help="Migrate sheet from old format to new")
+@inject
+async def migrate(
+    ctx: commands.Context,
+    *args: str,
+    character_sheet_hash: str = Provide[
+        AppConfigContainer.config.gapi.character_sheet_hash
+    ],
+    aiog: Aiogoogle = Provide[AppConfigContainer.aiog],
+) -> Any:
+    if len(args) != 1:
+        return await ctx.send(
+            "ERROR: Invalid number of arguments."
+            "Please provide the sheet you want to migrate as argument"
+        )
+    curr_sheet_title = args[0]
+    new_sheet_title = f"{curr_sheet_title}_new"
+    old_sheet_title = f"{curr_sheet_title}_old"
+
+    async with aiog:
+        sheets_service = await aiog.discover("sheets", "v4")
+        sheet_props = await get_sheets_properties(
+            aiog, sheets_service, character_sheet_hash
+        )
+        sheet_titles = [prop["title"] for prop in sheet_props]
+        old_sheet_title_exists = old_sheet_title in sheet_titles
+        curr_sheet_title_exists = curr_sheet_title in sheet_titles
+        new_sheet_title_exists = new_sheet_title in sheet_titles
+        if not curr_sheet_title_exists and not old_sheet_title_exists:
+            return await ctx.send(
+                f"ERROR: Cannot migrate {new_sheet_title}:"
+                f"Either sheet {curr_sheet_title} or {old_sheet_title} must exist"
+            )
+        if old_sheet_title_exists and curr_sheet_title_exists:
+            return await ctx.send(
+                f"ERROR: Cannot migrate {new_sheet_title}: Already migrated"
+            )
+
+        # Get source values from the source
+        source_sheet_title = (
+            old_sheet_title if old_sheet_title_exists else curr_sheet_title
+        )
+        req = sheets_service.spreadsheets.values.batchGet(
+            spreadsheetId=character_sheet_hash,
+            ranges=[
+                f"{source_sheet_title}!A2:A6",
+                f"{source_sheet_title}!C2:C6",
+                f"{source_sheet_title}!A8:A26",
+                f"{source_sheet_title}!C8:C26",
+                f"{source_sheet_title}!A28:A39",
+                f"{source_sheet_title}!C28:C39",
+                f"{source_sheet_title}!A42:A44",
+                f"{source_sheet_title}!C42:C44",
+                f"{source_sheet_title}!A47:A55",
+                f"{source_sheet_title}!C47:C55",
+            ],
+        )
+        res = await aiog.as_service_account(
+            req,
+        )
+        res = res["valueRanges"]
+        ability_to_xp: Dict[str, int] = {}
+        for i in range(0, len(res), 2):
+            keys = res[i]["values"]
+            vals = res[i + 1]["values"]
+            # Google Sheets API cuts off empty cells. in the end of a range
+            # Fill them up again in the vals so that the zip below works
+            if len(vals) < len(keys):
+                vals += [[]] * (len(keys) - len(vals))
+            for _key, _val in zip(keys, vals):
+                key = _key[0]
+                if key:
+                    val = int(_val[0]) if len(_val) else 0
+                    ability_to_xp[key] = val
+
+        # Create the new sheet by duplicating Blanko
+        blanko_sheet_id = sheet_props[sheet_titles.index("Blanko")]["sheetId"]
+        source_sheet_index = sheet_props[sheet_titles.index(source_sheet_title)][
+            "index"
+        ]
+        updateRequests = []
+        # If there is already a sheet with the new title, delete it first
+        if new_sheet_title_exists:
+            new_sheet_id = sheet_props[sheet_titles.index(new_sheet_title)]["sheetId"]
+            updateRequests.append({"deleteSheet": {"sheetId": new_sheet_id}})
+        # Insert duplicated sheet
+        updateRequests.append(
+            {
+                "duplicateSheet": {
+                    "sourceSheetId": blanko_sheet_id,
+                    "insertSheetIndex": source_sheet_index + 1,
+                    "newSheetName": new_sheet_title,
+                }
+            }
+        )
+
+        req = sheets_service.spreadsheets.batchUpdate(
+            spreadsheetId=character_sheet_hash,
+            data=json.dumps({"requests": updateRequests}),
+        )
+        res = await aiog.as_service_account(
+            req,
+        )
+
+        # Get all the values on the new sheet
+        req = sheets_service.spreadsheets.values.batchGet(
+            spreadsheetId=character_sheet_hash,
+            ranges=[f"{new_sheet_title}!A:A", f"{new_sheet_title}!D:D"],
+        )
+        res = await aiog.as_service_account(
+            req,
+        )
+        keys = res["valueRanges"][0]["values"]
+        update_ranges: List[Dict[str, Any]] = []
+        range_values: List[int] = []
+        for range_end, _key in enumerate(keys, start=0):
+            value: Optional[int] = ability_to_xp.get(_key[0]) if len(_key) else None
+            if value is None:
+                if len(range_values):
+                    range_begin = range_end - len(range_values) + 1
+                    update_ranges.append(
+                        {
+                            "range": f"{new_sheet_title}!D{range_begin}:D{range_end}",
+                            "values": [
+                                [] if val is None else [val] for val in range_values
+                            ],
+                        }
+                    )
+                    range_values = []
+            else:
+                range_values.append(value)
+
+        req = sheets_service.spreadsheets.values.batchUpdate(
+            spreadsheetId=character_sheet_hash,
+            data=json.dumps(
+                {"data": update_ranges, "valueInputOption": "USER_ENTERED"}
+            ),
+        )
+        res = await aiog.as_service_account(
+            req,
+        )
+
+        # If we got here, we can rename the current sheet (if any) to old and the new to current
+        sheet_props = await get_sheets_properties(
+            aiog, sheets_service, character_sheet_hash
+        )
+        sheet_titles = [prop["title"] for prop in sheet_props]
+        new_sheet_id = sheet_props[sheet_titles.index(new_sheet_title)]["sheetId"]
+
+        # rename current to old if old does not exist. Otherwise delete current
+        updateRequests = []
+        if curr_sheet_title_exists and not old_sheet_title_exists:
+            curr_sheet_id = sheet_props[sheet_titles.index(curr_sheet_title)]["sheetId"]
+            updateRequests.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": curr_sheet_id,
+                            "title": old_sheet_title,
+                        },
+                        "fields": "title",
+                    }
+                }
+            )
+        elif curr_sheet_title_exists:
+            curr_sheet_id = sheet_props[sheet_titles.index(curr_sheet_title)]["sheetId"]
+            updateRequests.append({"deleteSheet": {"sheetId": curr_sheet_id}})
+        # rename new sheet to current sheet
+        updateRequests.append(
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": new_sheet_id, "title": curr_sheet_title},
+                    "fields": "title",
+                }
+            }
+        )
+
+        req = sheets_service.spreadsheets.batchUpdate(
+            spreadsheetId=character_sheet_hash,
+            data=json.dumps({"requests": updateRequests}),
+        )
+        res = await aiog.as_service_account(
+            req,
+        )
+
+        return await ctx.send(
+            f"Successfully migrated sheet {curr_sheet_title}."
+            f"The old sheet can be found in {old_sheet_title}"
+        )
 
 
 @bot.command(name="claim", help="Bind a character sheet to your user")
@@ -152,9 +343,10 @@ async def claim(
 
     async with aiog:
         sheets_service = await aiog.discover("sheets", "v4")
-        sheet_titles = await get_sheet_titles(
+        sheet_props = await get_sheets_properties(
             aiog, sheets_service, character_sheet_hash
         )
+        sheet_titles = [prop["title"] for prop in sheet_props]
 
     if sheet_title not in sheet_titles:
         return await ctx.send(
@@ -256,9 +448,10 @@ async def check_impl(
     async with aiog:
         sheets_service = await aiog.discover("sheets", "v4")
         # First make sure that the character_name belongs to a valid sheet
-        sheet_titles = await get_sheet_titles(
+        sheet_props = await get_sheets_properties(
             aiog, sheets_service, character_sheet_hash
         )
+        sheet_titles = [prop["title"] for prop in sheet_props]
         if character_name not in sheet_titles:
             return await ctx.send(
                 f"ERROR: character name '{character_name}' does not correspond to a valid"

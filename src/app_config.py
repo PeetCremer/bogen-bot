@@ -32,16 +32,21 @@ class AppConfig(BaseConfig):
     db: DatabaseConfig = DatabaseConfig()
 
 
-async def init_aiog(google_application_credentials: str) -> Aiogoogle:
+async def init_aiog(
+    google_application_credentials: str, write_access: bool = False
+) -> Aiogoogle:
     # Explicitly set credentials, since loading them from .env files
     # does not set them as environment variable, but google API wants
     # it to be explicitly set
     os.environ.setdefault(
         "GOOGLE_APPLICATION_CREDENTIALS", google_application_credentials
     )
-    creds = ServiceAccountCreds(
-        scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+    scope = (
+        "https://www.googleapis.com/auth/spreadsheets"
+        if write_access
+        else "https://www.googleapis.com/auth/spreadsheets.readonly"
     )
+    creds = ServiceAccountCreds(scopes=[scope])
     aiog = Aiogoogle(service_account_creds=creds)
     # Notice this line. Here, Aiogoogle loads the service account key.
     await aiog.service_account_manager.detect_default_creds_source()
@@ -50,4 +55,6 @@ async def init_aiog(google_application_credentials: str) -> Aiogoogle:
 
 class AppConfigContainer(containers.DeclarativeContainer):
     config = providers.Configuration(pydantic_settings=[AppConfig()], strict=True)
-    aiog = providers.Resource(init_aiog, config.gapi.google_application_credentials)
+    aiog = providers.Resource(
+        init_aiog, config.gapi.google_application_credentials, True
+    )
